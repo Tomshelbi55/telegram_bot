@@ -1,0 +1,32 @@
+{
+  "name": "quran-daily-bot",
+  "version": "1.0.0",
+  "description": "A Telegram bot that sends daily Quran verses with translations and tafsir",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.64.0",
+    "node-cron": "^3.0.3",
+    "sqlite3": "^5.1.6",
+    "axios": "^1.6.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "quran",
+    "islamic",
+    "daily",
+    "verses"
+  ],
+  "author": "tom",
+  "license": "MIT"
+}
