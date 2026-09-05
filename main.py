@@ -48,6 +48,7 @@ from aiogram.types import (
 )
 from aiogram.filters import Command, CommandStart, Filter  # فیلترهای دریافت دستورات
 from aiogram.enums import ParseMode, ChatType      # فرمت‌بندی متن و نوع گفتگو
+from aiogram.exceptions import TelegramBadRequest  # برای نادیده گرفتن خطای "message is not modified"
 
 
 # ==================== ۲. تنظیمات اصلی ربات (از Environment Variables) ====================
@@ -474,6 +475,16 @@ def check_rate_limit(user_id: int) -> bool:
         return False
     user_last_request[user_id] = now
     return True
+
+
+async def safe_edit_text(message: Message, text: str, **kwargs):
+    """ویرایش امن پیام: اگر محتوای جدید دقیقاً با محتوای فعلی یکسان باشد،
+    تلگرام خطای 'message is not modified' می‌دهد که اینجا نادیده گرفته می‌شود."""
+    try:
+        await message.edit_text(text, **kwargs)
+    except TelegramBadRequest as e:
+        if "message is not modified" not in str(e):
+            raise
 
 
 def sanitize_input(text: str) -> str:
@@ -963,7 +974,8 @@ async def cb_admin_stats(callback: CallbackQuery):
         return
 
     summary = await stats.get_summary()
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback.message,
         summary,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔄 بروزرسانی", callback_data="admin_stats")],
@@ -1011,7 +1023,8 @@ async def cb_set_farsi(callback: CallbackQuery):
         callback_data=f"farsi_{k}"
     )] for k, name in AVAILABLE_TRANSLATIONS["farsi"].items()]
     kb.append([InlineKeyboardButton(text="🔙 برگشت", callback_data="admin_settings")])
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback.message,
         "🇮🇷 *انتخاب ترجمه فارسی:*",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
         parse_mode=ParseMode.MARKDOWN
@@ -1041,7 +1054,8 @@ async def cb_set_english(callback: CallbackQuery):
         callback_data=f"english_{k}"
     )] for k, name in AVAILABLE_TRANSLATIONS["english"].items()]
     kb.append([InlineKeyboardButton(text="🔙 برگشت", callback_data="admin_settings")])
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback.message,
         "🇬🇧 *انتخاب ترجمه انگلیسی:*",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
         parse_mode=ParseMode.MARKDOWN
@@ -1071,7 +1085,8 @@ async def cb_set_arabic(callback: CallbackQuery):
         callback_data=f"arabic_{k}"
     )] for k, name in AVAILABLE_TRANSLATIONS["arabic"].items()]
     kb.append([InlineKeyboardButton(text="🔙 برگشت", callback_data="admin_settings")])
-    await callback.message.edit_text(
+    await safe_edit_text(
+        callback.message,
         "🕋 *انتخاب نسخه عربی:*",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
         parse_mode=ParseMode.MARKDOWN
@@ -1170,7 +1185,7 @@ async def send_surah_page(target: Message, page: int, is_edit: bool = False):
     ])
 
     if is_edit:
-        await target.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        await safe_edit_text(target, text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
     else:
         await target.answer(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
@@ -1214,7 +1229,7 @@ async def send_settings_menu(target: Message, is_edit: bool = False):
     ])
 
     if is_edit:
-        await target.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        await safe_edit_text(target, text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
     else:
         await target.answer(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
