@@ -46,7 +46,7 @@ from aiogram.types import (
     InlineKeyboardButton,   # کلیدهای کیبورد شیشه‌ای
     ReactionTypeEmoji,      # سیستم ارسال واکنش ایموجی
 )
-from aiogram.filters import Command, CommandStart  # فیلترهای دریافت دستورات
+from aiogram.filters import Command, CommandStart, Filter  # فیلترهای دریافت دستورات
 from aiogram.enums import ParseMode, ChatType      # فرمت‌بندی متن و نوع گفتگو
 
 
@@ -445,6 +445,16 @@ config = ConfigManager(CONFIG_FILE)
 stats = AsyncStatsManager(DB_FILE)
 user_last_request: dict[int, float] = {}
 
+# مجموعه ادمین‌هایی که منتظر ارسال متن جدید پاورقی هستند (برای دکمه «✏️ تغییر پاورقی»)
+awaiting_footer: set[int] = set()
+
+
+class IsAwaitingFooter(Filter):
+    """فیلتری که فقط پیام‌های ادمینِ در حالت «انتظار پاورقی» را قبول می‌کند.
+    برای بقیه پیام‌ها False برمی‌گرداند تا دیسپچر به هندلر بعدی (handle_text) برود."""
+    async def __call__(self, message: Message) -> bool:
+        return message.from_user is not None and message.from_user.id in awaiting_footer
+
 # کلاینت HTTP ماندگار (Connection Pooling)
 http_session: aiohttp.ClientSession | None = None
 
@@ -534,17 +544,20 @@ async def get_ayah(surah: int = None, ayah_num: int = None) -> tuple[str | None,
         )
 
         if show_arabic:
-            msg += f"🕋 *متن عربی:*\n\n「 {d['text']} 」\n\n━━━━━━━━━━━━━━━\n\n"
+            arabic_text = d['text'].replace("`", "'")
+            msg += f"🕋 *متن عربی:*\n\n`{arabic_text}`\n\n━━━━━━━━━━━━━━━\n\n"
 
         if show_farsi and farsi_data and not isinstance(farsi_data, Exception):
             if farsi_data.get('code') == 200:
                 fa_name = AVAILABLE_TRANSLATIONS["farsi"].get(farsi_ed, farsi_ed)
-                msg += f"🇮🇷 *ترجمه فارسی ({fa_name}):*\n\n▫️ {farsi_data['data']['text']}\n\n━━━━━━━━━━━━━━━\n\n"
+                fa_text = farsi_data['data']['text'].replace("`", "'")
+                msg += f"🇮🇷 *ترجمه فارسی ({fa_name}):*\n\n`{fa_text}`\n\n━━━━━━━━━━━━━━━\n\n"
 
         if show_english and english_data and not isinstance(english_data, Exception):
             if english_data.get('code') == 200:
                 en_name = AVAILABLE_TRANSLATIONS["english"].get(english_ed, english_ed)
-                msg += f"🇬🇧 *{en_name}:*\n\n▫️ {english_data['data']['text']}\n\n━━━━━━━━━━━━━━━\n\n"
+                en_text = english_data['data']['text'].replace("`", "'")
+                msg += f"🇬🇧 *{en_name}:*\n\n`{en_text}`\n\n━━━━━━━━━━━━━━━\n\n"
 
         msg += footer
         return msg, surah_number
@@ -566,10 +579,11 @@ async def add_reaction_safe(message: Message):
             pass
 
 
-async def log_and_react(sent_msg: Message, chat_type: str, user,
+async def log_and_react(react_target: Message, chat_type: str, user,
                         chat_id: int, chat_title: str, surah: int, req_type: str):
-    """ثبت لاگ و ایموجی در پس‌زمینه بدون معطل کردن کاربر."""
-    await add_reaction_safe(sent_msg)
+    """ثبت لاگ و ایموجی در پس‌زمینه بدون معطل کردن کاربر.
+    react_target باید پیام خودِ کاربر باشد (نه پیام ربات) تا واکنش روی پیام او ثبت شود."""
+    await add_reaction_safe(react_target)
     try:
         if chat_type == "group":
             await stats.add_group(chat_id, chat_title)
@@ -663,9 +677,9 @@ async def cmd_random(message: Message):
     ])
 
     if result:
-        sent = await waiting_msg.edit_text(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        await waiting_msg.edit_text(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
         asyncio.create_task(log_and_react(
-            sent, chat_type, user,
+            message, chat_type, user,
             message.chat.id,
             message.chat.title or "",
             surah_num, "random"
@@ -717,9 +731,9 @@ async def cmd_ayah(message: Message, command: Command):
         ])
 
         if result:
-            sent = await waiting_msg.edit_text(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+            await waiting_msg.edit_text(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
             asyncio.create_task(log_and_react(
-                sent, chat_type, user,
+                message, chat_type, user,
                 message.chat.id, message.chat.title or "",
                 surah, "specific"
             ))
@@ -814,6 +828,31 @@ async def cmd_settings(message: Message):
 
 # ==================== ۱۴. پردازش پیام‌های متنی عادی و کلمات کلیدی ====================
 
+@router.message(F.text, IsAwaitingFooter())
+async def handle_footer_input(message: Message):
+    """دریافت متن جدید پاورقی از ادمینی که روی «✏️ تغییر پاورقی» زده است."""
+    admin_id = message.from_user.id
+
+    if message.text.strip() == "/cancel":
+        awaiting_footer.discard(admin_id)
+        await message.answer("❌ لغو شد. پاورقی تغییر نکرد.")
+        return
+
+    new_footer = message.text.strip()
+    if not new_footer:
+        await message.answer("⚠️ متن نمی‌تواند خالی باشد. دوباره بفرستید یا /cancel کنید.")
+        return
+
+    config.set("footer_text", new_footer)
+    fetch_ayah_json.cache_clear()  # پاک‌سازی کش تا پاورقی جدید در آیات بعدی اعمال شود
+    awaiting_footer.discard(admin_id)
+
+    await message.answer(
+        f"✅ پاورقی جدید ذخیره شد:\n\n{new_footer}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
 @router.message(F.text)
 async def handle_text(message: Message):
     """پردازش متن پیام‌های کاربران در گروه و خصوصی."""
@@ -854,9 +893,9 @@ async def handle_text(message: Message):
     ])
 
     if result:
-        sent = await waiting_msg.edit_text(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        await waiting_msg.edit_text(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
         asyncio.create_task(log_and_react(
-            sent, chat_type, user,
+            message, chat_type, user,
             message.chat.id, message.chat.title or "",
             surah_num, "random"
         ))
@@ -882,9 +921,12 @@ async def cb_random(callback: CallbackQuery):
     ])
 
     if result:
-        sent = await callback.message.answer(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        # چون این درخواست از طریق کلیک روی دکمه است (نه پیام متنی جدید کاربر)،
+        # واکنش روی همان پیامِ قبلیِ حاوی دکمه ثبت می‌شود که کاربر با آن تعامل داشته.
+        react_target = callback.message
+        await callback.message.answer(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
         asyncio.create_task(log_and_react(
-            sent, chat_type, user,
+            react_target, chat_type, user,
             callback.message.chat.id, callback.message.chat.title or "",
             surah_num, "random"
         ))
@@ -1094,6 +1136,7 @@ async def cb_set_footer(callback: CallbackQuery):
     await callback.answer()
     if not is_admin(callback.from_user.id):
         return
+    awaiting_footer.add(callback.from_user.id)
     await callback.message.answer(
         "✏️ *متن جدید پاورقی را بفرستید:*\n\n"
         f"متن کنونی:\n`{config.get('footer_text')}`\n\n"
@@ -1224,3 +1267,4 @@ if __name__ == "__main__":
     print(f"  👤 تعداد مدیران تعریف‌شده: {len(ADMIN_IDS)}")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     asyncio.run(main())
+
