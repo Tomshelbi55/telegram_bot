@@ -133,6 +133,21 @@ AVAILABLE_TRANSLATIONS = {
     }
 }
 
+# قاری‌های صوتی پشتیبانی‌شده در CDN تلاوت (هر کاربر می‌تواند قاری دلخواه را انتخاب کند)
+RECITERS = {
+    "ar.alafasy": "مشاری راشد العفاسی",
+    "ar.husary": "محمود خلیل الحصری",
+    "ar.minshawi": "محمد صدیق المنشاوی",
+    "ar.abdulbasit": "عبدالباسط عبدالصمد",
+    "ar.sudais": "عبدالرحمن السدیس",
+    "ar.shuraim": "سعود الشریم",
+}
+DEFAULT_RECITER = "ar.alafasy"
+
+# آدرس‌های CDN برای تصویر و صوت آیه (بدون نیاز به پردازش روی سرور خودمان)
+AUDIO_CDN = "https://cdn.islamic.network/quran/audio/128/{edition}/{number}.mp3"
+IMAGE_CDN = "https://cdn.islamic.network/quran/images/{surah}_{ayah}.png"
+
 # جدول مشخصات ۱۱۴ سوره قرآن: (نام عربی، نام انگلیسی، تعداد کل آیات)
 SURAH_LIST = {
     1: ("الفاتحة", "Al-Fatiha", 7), 2: ("البقرة", "Al-Baqarah", 286),
@@ -221,6 +236,8 @@ class ConfigManager:
             "show_arabic": True,
             "react_to_ayah": True,
             "footer_text": "🤲 _به نام خداوند بخشنده مهربان_",
+            "send_image": True,
+            "send_audio": True,
         }
 
     def _save(self):
@@ -259,9 +276,16 @@ class AsyncStatsManager:
                     username TEXT,
                     first_name TEXT,
                     join_date TEXT,
-                    last_request TEXT
+                    last_request TEXT,
+                    reciter TEXT
                 )
             ''')
+            # سازگاری با دیتابیس‌های قدیمی‌تر که ستون reciter را ندارند
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN reciter TEXT")
+                await db.commit()
+            except Exception:
+                pass  # ستون از قبل وجود دارد
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS groups (
                     id INTEGER PRIMARY KEY,
@@ -306,6 +330,26 @@ class AsyncStatsManager:
                   datetime.now().strftime("%Y-%m-%d"),
                   datetime.now().isoformat()))
             await db.commit()
+
+    async def set_user_reciter(self, user_id: int, reciter: str):
+        """ذخیره قاری دلخواه کاربر برای پخش صوت آیات (ماندگار در دیتابیس)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO users (id, reciter, join_date, last_request)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET reciter=excluded.reciter
+            ''', (user_id, reciter,
+                  datetime.now().strftime("%Y-%m-%d"),
+                  datetime.now().isoformat()))
+            await db.commit()
+
+    async def get_user_reciter(self, user_id: int) -> str:
+        """دریافت قاری دلخواه کاربر؛ در صورت نبود، قاری پیش‌فرض برگردانده می‌شود."""
+        async with aiosqlite.connect(self.db_path) as db:
+            row = await (await db.execute(
+                "SELECT reciter FROM users WHERE id = ?", (user_id,)
+            )).fetchone()
+            return row[0] if row and row[0] else DEFAULT_RECITER
 
     async def add_group(self, chat_id: int, title: str):
         """ثبت مشخصات گروه."""
@@ -514,9 +558,11 @@ async def fetch_ayah_json(url: str) -> dict | None:
         return None
 
 
-async def get_ayah(surah: int = None, ayah_num: int = None) -> tuple[str | None, int | None]:
+async def get_ayah(surah: int = None, ayah_num: int = None) -> tuple[str | None, int | None, int | None, int | None]:
     """
     دریافت همزمان متن عربی، ترجمه فارسی و انگلیسی آیه با استفاده از gather.
+    خروجی: (متن_پیام، شماره_سوره، شماره_آیه_در_سوره، شماره_سراسری_آیه)
+    دو مقدار آخر برای ساخت لینک تصویر و صوت آیه لازم هستند.
     """
     try:
         reference = f"{surah}:{ayah_num}" if surah and ayah_num else random.randint(1, 6236)
@@ -543,14 +589,16 @@ async def get_ayah(surah: int = None, ayah_num: int = None) -> tuple[str | None,
         )
 
         if not arabic_data or isinstance(arabic_data, Exception) or arabic_data.get('code') != 200:
-            return None, None
+            return None, None, None, None
 
         d = arabic_data['data']
         surah_number = d['surah']['number']
+        ayah_in_surah = d['numberInSurah']
+        global_ayah_number = d['number']  # شماره سراسری آیه در کل قرآن (۱ تا ۶۲۳۶) — برای لینک صوت لازم است
 
         msg = (
             f"📖 *سوره {d['surah']['name']} ({d['surah']['englishName']})*\n"
-            f"📌 سوره {surah_number} ، آیه {d['numberInSurah']}\n\n"
+            f"📌 سوره {surah_number} ، آیه {ayah_in_surah}\n\n"
             f"━━━━━━━━━━━━━━━\n\n"
         )
 
@@ -571,11 +619,40 @@ async def get_ayah(surah: int = None, ayah_num: int = None) -> tuple[str | None,
                 msg += f"🇬🇧 *{en_name}:*\n\n`{en_text}`\n\n━━━━━━━━━━━━━━━\n\n"
 
         msg += footer
-        return msg, surah_number
+        return msg, surah_number, ayah_in_surah, global_ayah_number
 
     except Exception as e:
         logger.error(f"خطا در تابع get_ayah: {e}")
-        return None, None
+        return None, None, None, None
+
+
+# ==================== ۹.۵ ارسال تصویر و صوت آیه (از CDN، بدون پردازش روی سرور) ====================
+
+async def send_ayah_image(target: Message, surah: int, ayah_in_surah: int):
+    """ارسال تصویر آیه از CDN، قبل از متن آیه. خطاها بی‌صدا نادیده گرفته می‌شوند
+    تا در صورت مشکل موقت CDN، ارسال متن آیه مختل نشود."""
+    if not config.get("send_image", True):
+        return
+    try:
+        url = IMAGE_CDN.format(surah=surah, ayah=ayah_in_surah)
+        await target.answer_photo(photo=url)
+    except Exception as e:
+        logger.error(f"خطا در ارسال تصویر آیه: {e}")
+
+
+async def send_ayah_audio(target: Message, global_ayah_number: int, user_id: int):
+    """ارسال صوت آیه از CDN با قاری منتخب همان کاربر (یا قاری پیش‌فرض)."""
+    if not config.get("send_audio", True):
+        return
+    try:
+        reciter = await stats.get_user_reciter(user_id)
+        url = AUDIO_CDN.format(edition=reciter, number=global_ayah_number)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎙 تغییر قاری", callback_data="choose_reciter")]
+        ])
+        await target.answer_audio(audio=url, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"خطا در ارسال صوت آیه: {e}")
 
 
 # ==================== ۱۰. عملیات پس‌زمینه (Background Tasks) ====================
@@ -643,6 +720,7 @@ async def cmd_start(message: Message):
             InlineKeyboardButton(text="📚 ۳۹-۷۶", callback_data="surah_page_2"),
         ],
         [InlineKeyboardButton(text="📚 ۷۷-۱۱۴", callback_data="surah_page_3")],
+        [InlineKeyboardButton(text="🎙 انتخاب قاری", callback_data="choose_reciter")],
         [InlineKeyboardButton(text="❓ راهنما", callback_data="help")],
     ]
     if is_admin(user.id):
@@ -681,14 +759,17 @@ async def cmd_random(message: Message):
         return
 
     waiting_msg = await message.answer("⏳ در حال دریافت آیه...")
-    result, surah_num = await get_ayah()
+    result, surah_num, ayah_in_surah, global_ayah_num = await get_ayah()
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎲 آیه بعدی", callback_data="random")]
     ])
 
     if result:
+        # ترتیب ارسال طبق درخواست: تصویر بالای آیه، صوت پایین آیه
+        await send_ayah_image(message, surah_num, ayah_in_surah)
         await waiting_msg.edit_text(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        await send_ayah_audio(message, global_ayah_num, user.id)
         asyncio.create_task(log_and_react(
             message, chat_type, user,
             message.chat.id,
@@ -735,14 +816,16 @@ async def cmd_ayah(message: Message, command: Command):
                 return
 
         waiting_msg = await message.answer("⏳ در حال دریافت...")
-        result, _ = await get_ayah(surah, ayah)
+        result, surah_num, ayah_in_surah, global_ayah_num = await get_ayah(surah, ayah)
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎲 آیه رندوم", callback_data="random")]
         ])
 
         if result:
+            await send_ayah_image(message, surah_num, ayah_in_surah)
             await waiting_msg.edit_text(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+            await send_ayah_audio(message, global_ayah_num, user.id)
             asyncio.create_task(log_and_react(
                 message, chat_type, user,
                 message.chat.id, message.chat.title or "",
@@ -897,14 +980,16 @@ async def handle_text(message: Message):
         return
 
     waiting_msg = await message.answer("⏳ در حال دریافت آیه...")
-    result, surah_num = await get_ayah()
+    result, surah_num, ayah_in_surah, global_ayah_num = await get_ayah()
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎲 آیه بعدی", callback_data="random")]
     ])
 
     if result:
+        await send_ayah_image(message, surah_num, ayah_in_surah)
         await waiting_msg.edit_text(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        await send_ayah_audio(message, global_ayah_num, user.id)
         asyncio.create_task(log_and_react(
             message, chat_type, user,
             message.chat.id, message.chat.title or "",
@@ -926,7 +1011,7 @@ async def cb_random(callback: CallbackQuery):
         await callback.answer("⏳ صبر کنید...", show_alert=True)
         return
 
-    result, surah_num = await get_ayah()
+    result, surah_num, ayah_in_surah, global_ayah_num = await get_ayah()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎲 آیه بعدی", callback_data="random")]
     ])
@@ -935,7 +1020,9 @@ async def cb_random(callback: CallbackQuery):
         # چون این درخواست از طریق کلیک روی دکمه است (نه پیام متنی جدید کاربر)،
         # واکنش روی همان پیامِ قبلیِ حاوی دکمه ثبت می‌شود که کاربر با آن تعامل داشته.
         react_target = callback.message
+        await send_ayah_image(callback.message, surah_num, ayah_in_surah)
         await callback.message.answer(result, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+        await send_ayah_audio(callback.message, global_ayah_num, user.id)
         asyncio.create_task(log_and_react(
             react_target, chat_type, user,
             callback.message.chat.id, callback.message.chat.title or "",
@@ -962,6 +1049,33 @@ async def cb_help(callback: CallbackQuery):
         "▫️ در گروه: *آیه رندوم*",
         parse_mode=ParseMode.MARKDOWN
     )
+
+
+# --- انتخاب قاری توسط کاربر (برای همه کاربران آزاد است، نه فقط ادمین) ---
+
+@router.callback_query(F.data == "choose_reciter")
+async def cb_choose_reciter(callback: CallbackQuery):
+    await callback.answer()
+    current = await stats.get_user_reciter(callback.from_user.id)
+    kb = [[InlineKeyboardButton(
+        text=f"{name}{' ✅' if k == current else ''}",
+        callback_data=f"reciter_{k}"
+    )] for k, name in RECITERS.items()]
+    await callback.message.answer(
+        "🎙 *انتخاب قاری صوت آیات:*",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+@router.callback_query(F.data.startswith("reciter_"))
+async def cb_pick_reciter(callback: CallbackQuery):
+    key = callback.data[len("reciter_"):]
+    if key not in RECITERS:
+        await callback.answer("❌ قاری نامعتبر است.", show_alert=True)
+        return
+    await stats.set_user_reciter(callback.from_user.id, key)
+    await callback.answer(f"✅ قاری صوت شما: {RECITERS[key]}", show_alert=True)
 
 
 # --- منوهای ادمین ---
@@ -1146,6 +1260,24 @@ async def cb_toggle_react(callback: CallbackQuery):
     await send_settings_menu(callback.message, is_edit=True)
 
 
+@router.callback_query(F.data == "toggle_image")
+async def cb_toggle_image(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        return
+    config.set("send_image", not config.get("send_image", True))
+    await send_settings_menu(callback.message, is_edit=True)
+
+
+@router.callback_query(F.data == "toggle_audio")
+async def cb_toggle_audio(callback: CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        return
+    config.set("send_audio", not config.get("send_audio", True))
+    await send_settings_menu(callback.message, is_edit=True)
+
+
 @router.callback_query(F.data == "set_footer")
 async def cb_set_footer(callback: CallbackQuery):
     await callback.answer()
@@ -1198,6 +1330,8 @@ async def send_settings_menu(target: Message, is_edit: bool = False):
     show_en = "✅" if config.get("show_english", True) else "❌"
     show_ar = "✅" if config.get("show_arabic", True) else "❌"
     react = "✅" if config.get("react_to_ayah", True) else "❌"
+    send_img = "✅" if config.get("send_image", True) else "❌"
+    send_aud = "✅" if config.get("send_audio", True) else "❌"
 
     fa_name = AVAILABLE_TRANSLATIONS["farsi"].get(farsi_ed, farsi_ed)
     en_name = AVAILABLE_TRANSLATIONS["english"].get(english_ed, english_ed)
@@ -1211,7 +1345,9 @@ async def send_settings_menu(target: Message, is_edit: bool = False):
         f"نمایش عربی: {show_ar}\n"
         f"نمایش فارسی: {show_fa}\n"
         f"نمایش انگلیسی: {show_en}\n"
-        f"واکنش به آیه: {react}\n\n━━━━━━━━━━━━━━━"
+        f"واکنش به آیه: {react}\n"
+        f"ارسال تصویر آیه: {send_img}\n"
+        f"ارسال صوت آیه: {send_aud}\n\n━━━━━━━━━━━━━━━"
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1223,7 +1359,11 @@ async def send_settings_menu(target: Message, is_edit: bool = False):
             InlineKeyboardButton(text=f"فارسی {show_fa}", callback_data="toggle_farsi"),
             InlineKeyboardButton(text=f"انگلیسی {show_en}", callback_data="toggle_english"),
         ],
-        [InlineKeyboardButton(text=f"واکنش {react}", callback_data="toggle_react")],
+        [
+            InlineKeyboardButton(text=f"واکنش {react}", callback_data="toggle_react"),
+            InlineKeyboardButton(text=f"تصویر {send_img}", callback_data="toggle_image"),
+            InlineKeyboardButton(text=f"صوت {send_aud}", callback_data="toggle_audio"),
+        ],
         [InlineKeyboardButton(text="✏️ تغییر پاورقی", callback_data="set_footer")],
         [InlineKeyboardButton(text="🔙 برگشت به آمار", callback_data="admin_stats")],
     ])
